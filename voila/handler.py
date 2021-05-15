@@ -28,6 +28,7 @@ from ._version import __version__
 from .execute import VoilaExecutor, strip_code_cell_warnings
 from .exporter import VoilaExporter
 from .paths import collect_template_paths
+from notebook.auth.security import passwd_check
 
 
 class VoilaHandler(JupyterHandler):
@@ -104,6 +105,144 @@ class VoilaHandler(JupyterHandler):
                 authors = None
         else:
             authors = None 
+
+        if 'voila' in notebook.metadata:
+            if 'passwd' in notebook.metadata['voila']:
+                self.write(self.render_template('osscar-login.html'))
+                return
+        
+        # render notebook to html
+        resources = {
+            'base_url': self.base_url,
+            'nbextensions': nbextensions,
+            'theme': theme,
+            'authors': authors,
+            'template': template_name,
+            'metadata': {
+                'name': notebook_name
+            }
+        }
+
+        # include potential extra resources
+        extra_resources = self.voila_configuration.config.VoilaConfiguration.resources
+        # if no resources get configured from neither the CLI nor a config file,
+        # extra_resources is a traitlets.config.loader.LazyConfigValue object
+        # This seems to only happy with the notebook server and traitlets 5
+        # Note that we use string checking for backward compatibility
+        if 'DeferredConfigString' in str(type(extra_resources)):
+            from .configuration import VoilaConfiguration
+            extra_resources = VoilaConfiguration.resources.from_string(extra_resources)
+        if not isinstance(extra_resources, dict):
+            extra_resources = extra_resources.to_dict()
+        if extra_resources:
+            recursive_update(resources, extra_resources)
+
+        self.exporter = VoilaExporter(
+            template_paths=self.template_paths,
+            template_name=template_name,
+            config=self.traitlet_config,
+            contents_manager=self.contents_manager,  # for the image inlining
+            theme=theme,  # we now have the theme in two places
+            base_url=self.base_url,
+        )
+        if self.voila_configuration.strip_sources:
+            self.exporter.exclude_input = True
+            self.exporter.exclude_output_prompt = True
+            self.exporter.exclude_input_prompt = True
+
+        # These functions allow the start of a kernel and execution of the notebook after (parts of) the template
+        # has been rendered and send to the client to allow progressive rendering.
+        # Template should first call kernel_start, and then decide to use notebook_execute
+        # or cell_generator to implement progressive cell rendering
+        extra_context = {
+            'kernel_start': self._jinja_kernel_start,
+            'cell_generator': self._jinja_cell_generator,
+            'notebook_execute': self._jinja_notebook_execute,
+        }
+
+        # Compose reply
+        self.set_header('Content-Type', 'text/html')
+        self.set_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.set_header('Pragma', 'no-cache')
+        self.set_header('Expires', '0')
+        # render notebook in snippets, and flush them out to the browser can render progresssively
+        async for html_snippet, resources in self.exporter.generate_from_notebook_node(notebook, resources=resources, extra_context=extra_context):
+            self.write(html_snippet)
+            self.flush()  # we may not want to consider not flusing after each snippet, but add an explicit flush function to the jinja context
+            # yield  # give control back to tornado's IO loop, so it can handle static files or other requests
+        self.flush()
+
+    @tornado.web.authenticated
+    async def post(self, path=None):
+        # if the handler got a notebook_path argument, always serve that
+        notebook_path = self.notebook_path or path
+        if self.notebook_path and path:  # when we are in single notebook mode but have a path
+            self.redirect_to_file(path)
+            return
+
+        if self.voila_configuration.enable_nbextensions:
+            # generate a list of nbextensions that are enabled for the classical notebook
+            # a template can use that to load classical notebook extensions, but does not have to
+            notebook_config = self.config_manager.get('notebook')
+            # except for the widget extension itself, since Voilà has its own
+            load_extensions = notebook_config.get('load_extensions', {})
+            if 'jupyter-js-widgets/extension' in load_extensions:
+                load_extensions['jupyter-js-widgets/extension'] = False
+            if 'voila/extension' in load_extensions:
+                load_extensions['voila/extension'] = False
+            nbextensions = [name for name, enabled in load_extensions.items() if enabled]
+        else:
+            nbextensions = []
+
+        notebook = await self.load_notebook(notebook_path)
+        if not notebook:
+            return
+        self.cwd = os.path.dirname(notebook_path)
+
+        path, basename = os.path.split(notebook_path)
+        notebook_name = os.path.splitext(basename)[0]
+
+        # Adding request uri to kernel env
+        self.kernel_env = os.environ.copy()
+        self.kernel_env['SCRIPT_NAME'] = self.request.path
+        self.kernel_env['PATH_INFO'] = ''  # would be /foo/bar if voila.ipynb/foo/bar was supported
+        self.kernel_env['QUERY_STRING'] = str(self.request.query)
+        self.kernel_env['SERVER_SOFTWARE'] = 'voila/{}'.format(__version__)
+        self.kernel_env['SERVER_PROTOCOL'] = str(self.request.version)
+        host, port = split_host_and_port(self.request.host.lower())
+        self.kernel_env['SERVER_PORT'] = str(port) if port else ''
+        self.kernel_env['SERVER_NAME'] = host
+
+        # we can override the template via notebook metadata or a query parameter
+        template_override = None
+        if 'voila' in notebook.metadata and self.voila_configuration.allow_template_override in ['YES', 'NOTEBOOK']:
+            template_override = notebook.metadata['voila'].get('template')
+        if self.voila_configuration.allow_template_override == 'YES':
+            template_override = self.get_argument("voila-template", template_override)
+        if template_override:
+            self.template_paths = collect_template_paths(['voila', 'nbconvert'], template_override)
+        template_name = template_override or self.voila_configuration.template
+
+        theme = self.voila_configuration.theme
+        if 'voila' in notebook.metadata and self.voila_configuration.allow_theme_override in ['YES', 'NOTEBOOK']:
+            theme = notebook.metadata['voila'].get('theme', theme)
+        if self.voila_configuration.allow_theme_override == 'YES':
+            theme = self.get_argument("voila-theme", theme)
+
+        if 'voila' in notebook.metadata:
+            if 'authors' in notebook.metadata['voila']:
+                authors = notebook.metadata['voila'].get('authors')
+            else:
+                authors = None
+        else:
+            authors = None 
+
+        env_passwd = notebook.metadata['voila'].get('passwd')
+        input_passwd = self.get_body_argument('message')
+
+        if not passwd_check(os.getenv(env_passwd), input_passwd) or env_passwd is None:
+            self.write(self.render_template('osscar-login.html'))
+            return
         
         # render notebook to html
         resources = {
