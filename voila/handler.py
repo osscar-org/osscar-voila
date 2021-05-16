@@ -41,6 +41,7 @@ class VoilaHandler(JupyterHandler):
         self.voila_configuration = kwargs['voila_configuration']
         # we want to avoid starting multiple kernels due to template mistakes
         self.kernel_started = False
+        self.allow_datacollection = False            
 
     @tornado.web.authenticated
     async def get(self, path=None):
@@ -98,8 +99,6 @@ class VoilaHandler(JupyterHandler):
             theme = notebook.metadata['voila'].get('theme', theme)
         if self.voila_configuration.allow_theme_override == 'YES':
             theme = self.get_argument("voila-theme", theme)
-            
-        self.allow_datacollection = False
 
         if 'voila' in notebook.metadata:
             if 'authors' in notebook.metadata['voila']:
@@ -359,7 +358,7 @@ class VoilaHandler(JupyterHandler):
     async def _jinja_cell_generator(self, nb, kernel_id):
         """Generator that will execute a single notebook cell at a time"""
         nb, resources = ClearOutputPreprocessor().preprocess(nb, {'metadata': {'path': self.cwd}})
-        if self.allow_datacollection:
+        if self.allow_datacollection == True:
             nb.cells.insert(0, new_code_cell('allow_datacollection = True'))
 
         if self.allow_datacollection == False:
