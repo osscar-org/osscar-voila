@@ -29,6 +29,7 @@ from .execute import VoilaExecutor, strip_code_cell_warnings
 from .exporter import VoilaExporter
 from .paths import collect_template_paths
 from notebook.auth.security import passwd_check
+from nbformat.v4 import new_code_cell
 
 
 class VoilaHandler(JupyterHandler):
@@ -110,6 +111,12 @@ class VoilaHandler(JupyterHandler):
             if 'passwd' in notebook.metadata['voila']:
                 self.write(self.render_template('osscar-login.html'))
                 return
+
+        if 'voila' in notebook.metadata:
+            if 'notification' in notebook.metadata['voila']:
+                self.write(self.render_template('osscar-notification.html'))
+                return
+
         
         # render notebook to html
         resources = {
@@ -237,12 +244,23 @@ class VoilaHandler(JupyterHandler):
         else:
             authors = None 
 
-        env_passwd = notebook.metadata['voila'].get('passwd')
-        input_passwd = self.get_body_argument('message')
+        if 'passwd' in notebook.metadata['voila']:
+            env_passwd = os.getenv(notebook.metadata['voila'].get('passwd'))
+            input_passwd = self.get_body_argument('message')
 
-        if not passwd_check(os.getenv(env_passwd), input_passwd) or env_passwd is None:
-            self.write(self.render_template('osscar-login.html'))
-            return
+            if env_passwd is None:
+                self.write(self.render_template('osscar-login.html'))
+                return
+
+            if not passwd_check(env_passwd, input_passwd):
+                self.write(self.render_template('osscar-login.html'))
+                return
+
+        self.allow_datacollection = False
+
+        if 'notification' in notebook.metadata['voila']:
+            if self.get_argument('accept-datacollection', None) is not None:
+                self.allow_datacollection = True
         
         # render notebook to html
         resources = {
@@ -342,6 +360,12 @@ class VoilaHandler(JupyterHandler):
     async def _jinja_cell_generator(self, nb, kernel_id):
         """Generator that will execute a single notebook cell at a time"""
         nb, resources = ClearOutputPreprocessor().preprocess(nb, {'metadata': {'path': self.cwd}})
+        if self.allow_datacollection:
+            nb.cells.insert(0, new_code_cell('allow_datacollection = True'))
+
+        if self.allow_datacollection == False:
+            nb.cells.insert(0, new_code_cell('allow_datacollection = False'))
+        
         for cell_idx, input_cell in enumerate(nb.cells):
             try:
                 task = asyncio.ensure_future(self.executor.execute_cell(input_cell, None, cell_idx, store_history=False))
