@@ -75,7 +75,7 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setup_args = dict(
-    name='osscar-voila',
+    name=name,
     version=version,
     url="https://github.com/voila-dashboards/voila",
     author="Voila Development Team",
