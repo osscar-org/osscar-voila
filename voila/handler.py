@@ -98,6 +98,8 @@ class VoilaHandler(JupyterHandler):
             theme = notebook.metadata['voila'].get('theme', theme)
         if self.voila_configuration.allow_theme_override == 'YES':
             theme = self.get_argument("voila-theme", theme)
+            
+        self.allow_datacollection = False
 
         if 'voila' in notebook.metadata:
             if 'authors' in notebook.metadata['voila']:
@@ -116,7 +118,6 @@ class VoilaHandler(JupyterHandler):
             if 'notification' in notebook.metadata['voila']:
                 self.write(self.render_template('osscar-notification.html'))
                 return
-
         
         # render notebook to html
         resources = {
@@ -255,8 +256,6 @@ class VoilaHandler(JupyterHandler):
             if not passwd_check(env_passwd, input_passwd):
                 self.write(self.render_template('osscar-login.html'))
                 return
-
-        self.allow_datacollection = False
 
         if 'notification' in notebook.metadata['voila']:
             if self.get_argument('accept-datacollection', None) is not None:
